@@ -16,7 +16,7 @@ env:
   # /dev.Dockerfile
   # /make/builder.Dockerfile
   # /.github/workflows/main.yml
-  GO_VERSION: 1.15.6
+  GO_VERSION: 1.15.7
 
 jobs:
   main:
@@ -42,7 +42,7 @@ jobs:
       - name: setup go ${{ env.GO_VERSION }}
         uses: actions/setup-go@v2
         with:
-          go-version: '~${{ env.GO_VERSION }}'
+          go-version: '${{ env.GO_VERSION }}'
 
       - name: Set env
         run: echo "RELEASE_VERSION=${GITHUB_REF#refs/*/}" >> $GITHUB_ENV
@@ -51,7 +51,7 @@ jobs:
         run: SKIP_VERSION_CHECK=1 make release tag=${{ env.RELEASE_VERSION }}
 
       - name: Create Release
-        uses: softprops/action-gh-release@v1
+        uses: lightninglabs/gh-actions/action-gh-release@2021.01.25.00
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
@@ -73,10 +73,10 @@ jobs:
             curl https://keybase.io/roasbeef/pgp_keys.asc | gpg --import
             ```
 
-            Once you have the required PGP keys, you can verify the release (assuming `manifest-roasbeef-${{ env.RELEASE_VERSION }}.txt.asc` is in the current directory) with:
+            Once you have the required PGP keys, you can verify the release (assuming `manifest-roasbeef-${{ env.RELEASE_VERSION }}.sig` and `manifest-${{ env.RELEASE_VERSION }}.txt` are in the current directory) with:
 
             ```
-            gpg --verify manifest-roasbeef-${{ env.RELEASE_VERSION }}.txt.asc
+            gpg --verify manifest-roasbeef-${{ env.RELEASE_VERSION }}.sig manifest-${{ env.RELEASE_VERSION }}.txt
             ```
 
             You should see the following if the verification was successful:
@@ -95,7 +95,7 @@ jobs:
 
             Assuming you have the opentimestamps client installed locally, the timestamps can be verified with the following commands: 
             ```
-            ots verify manifest-roasbeef-${{ env.RELEASE_VERSION }}.txt.asc.ots -f manifest-roasbeef-${{ env.RELEASE_VERSION }}.txt.asc
+            ots verify manifest-roasbeef-${{ env.RELEASE_VERSION }}.sig.ots -f manifest-roasbeef-${{ env.RELEASE_VERSION }}.sig
             ```
 
             Alternatively, [the open timestamps website](https://opentimestamps.org/) can be used to verify timestamps if one doesn't have a `bitcoind` instance accessible locally. 

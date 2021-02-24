@@ -1630,6 +1630,24 @@
             }
           }
         },
+        "parameters": [
+          {
+            "name": "failed_payments_only",
+            "description": "Only delete failed payments.",
+            "in": "query",
+            "required": false,
+            "type": "boolean",
+            "format": "boolean"
+          },
+          {
+            "name": "failed_htlcs_only",
+            "description": "Only delete failed HTLCs from payments, not the payment itself.",
+            "in": "query",
+            "required": false,
+            "type": "boolean",
+            "format": "boolean"
+          }
+        ],
         "tags": [
           "Lightning"
         ]
@@ -2269,10 +2287,11 @@
       "enum": [
         "UNKNOWN_SYNC",
         "ACTIVE_SYNC",
-        "PASSIVE_SYNC"
+        "PASSIVE_SYNC",
+        "PINNED_SYNC"
       ],
       "default": "UNKNOWN_SYNC",
-      "description": " - UNKNOWN_SYNC: Denotes that we cannot determine the peer's current sync type.\n - ACTIVE_SYNC: Denotes that we are actively receiving new graph updates from the peer.\n - PASSIVE_SYNC: Denotes that we are not receiving new graph updates from the peer."
+      "description": " - UNKNOWN_SYNC: Denotes that we cannot determine the peer's current sync type.\n - ACTIVE_SYNC: Denotes that we are actively receiving new graph updates from the peer.\n - PASSIVE_SYNC: Denotes that we are not receiving new graph updates from the peer.\n - PINNED_SYNC: Denotes that this peer is pinned into an active sync."
     },
     "PendingChannelsResponseClosedChannel": {
       "type": "object",
@@ -3851,6 +3870,11 @@
     "lnrpcHTLCAttempt": {
       "type": "object",
       "properties": {
+        "attempt_id": {
+          "type": "string",
+          "format": "uint64",
+          "description": "The unique ID that is used for this attempt."
+        },
         "status": {
           "$ref": "#/definitions/HTLCAttemptHTLCStatus",
           "description": "The status of the HTLC."

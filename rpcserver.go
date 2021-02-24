@@ -73,6 +73,8 @@ import (
 	"github.com/lightningnetwork/lnd/zpay32"
 	"github.com/tv42/zbase32"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 	"gopkg.in/macaroon-bakery.v2/bakery"
 )
 
@@ -619,9 +621,9 @@ func newRPCServer(cfg *Config, s *server, macService *macaroons.Service,
 	err = subServerCgs.PopulateDependencies(
 		cfg, s.cc, cfg.networkDir, macService, atpl, invoiceRegistry,
 		s.htlcSwitch, cfg.ActiveNetParams.Params, s.chanRouter,
-		routerBackend, s.nodeSigner, s.remoteChanDB, s.sweeper, tower,
-		s.towerClient, s.anchorTowerClient, cfg.net.ResolveTCPAddr,
-		genInvoiceFeatures, rpcsLog,
+		routerBackend, s.nodeSigner, s.localChanDB, s.remoteChanDB,
+		s.sweeper, tower, s.towerClient, s.anchorTowerClient,
+		cfg.net.ResolveTCPAddr, genInvoiceFeatures, rpcsLog,
 	)
 	if err != nil {
 		return nil, err
@@ -2744,6 +2746,8 @@ func (r *rpcServer) ListPeers(ctx context.Context,
 				lnrpcSyncType = lnrpc.Peer_ACTIVE_SYNC
 			case discovery.PassiveSync:
 				lnrpcSyncType = lnrpc.Peer_PASSIVE_SYNC
+			case discovery.PinnedSync:
+				lnrpcSyncType = lnrpc.Peer_PINNED_SYNC
 			default:
 				return nil, fmt.Errorf("unhandled sync type %v",
 					syncType)
@@ -5308,7 +5312,10 @@ func (r *rpcServer) GetNodeInfo(ctx context.Context,
 	// to this public key. If the node cannot be found, then an error will
 	// be returned.
 	node, err := graph.FetchLightningNode(nil, pubKey)
-	if err != nil {
+	switch {
+	case err == channeldb.ErrGraphNodeNotFound:
+		return nil, status.Error(codes.NotFound, err.Error())
+	case err != nil:
 		return nil, err
 	}
 
@@ -5703,11 +5710,17 @@ func (r *rpcServer) ListPayments(ctx context.Context,
 
 // DeleteAllPayments deletes all outgoing payments from DB.
 func (r *rpcServer) DeleteAllPayments(ctx context.Context,
-	_ *lnrpc.DeleteAllPaymentsRequest) (*lnrpc.DeleteAllPaymentsResponse, error) {
+	req *lnrpc.DeleteAllPaymentsRequest) (
+	*lnrpc.DeleteAllPaymentsResponse, error) {
 
-	rpcsLog.Debugf("[DeleteAllPayments]")
+	rpcsLog.Infof("[DeleteAllPayments] failed_payments_only=%v, "+
+		"failed_htlcs_only=%v", req.FailedPaymentsOnly,
+		req.FailedHtlcsOnly)
 
-	if err := r.server.remoteChanDB.DeletePayments(); err != nil {
+	err := r.server.remoteChanDB.DeletePayments(
+		req.FailedPaymentsOnly, req.FailedHtlcsOnly,
+	)
+	if err != nil {
 		return nil, err
 	}
 

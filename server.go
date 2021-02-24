@@ -670,7 +670,7 @@ func newServer(cfg *Config, listenAddrs []net.Addr,
 	// With the announcement generated, we'll sign it to properly
 	// authenticate the message on the network.
 	authSig, err := netann.SignAnnouncement(
-		s.nodeSigner, s.identityECDH.PubKey(), nodeAnn,
+		s.nodeSigner, nodeKeyECDH.PubKey(), nodeAnn,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("unable to generate signature for "+
@@ -725,14 +725,17 @@ func newServer(cfg *Config, listenAddrs []net.Addr,
 	// servers, the mission control instance itself can be moved there too.
 	routingConfig := routerrpc.GetRoutingConfig(cfg.SubRPCServers.RouterRPC)
 
+	estimatorCfg := routing.ProbabilityEstimatorCfg{
+		AprioriHopProbability: routingConfig.AprioriHopProbability,
+		PenaltyHalfLife:       routingConfig.PenaltyHalfLife,
+		AprioriWeight:         routingConfig.AprioriWeight,
+	}
+
 	s.missionControl, err = routing.NewMissionControl(
-		remoteChanDB,
+		remoteChanDB, selfNode.PubKeyBytes,
 		&routing.MissionControlConfig{
-			AprioriHopProbability:   routingConfig.AprioriHopProbability,
-			PenaltyHalfLife:         routingConfig.PenaltyHalfLife,
+			ProbabilityEstimatorCfg: estimatorCfg,
 			MaxMcHistory:            routingConfig.MaxMcHistory,
-			AprioriWeight:           routingConfig.AprioriWeight,
-			SelfNode:                selfNode.PubKeyBytes,
 			MinFailureRelaxInterval: routing.DefaultMinFailureRelaxInterval,
 		},
 	)
@@ -819,9 +822,9 @@ func newServer(cfg *Config, listenAddrs []net.Addr,
 		MinimumBatchSize:        10,
 		SubBatchDelay:           time.Second * 5,
 		IgnoreHistoricalFilters: cfg.IgnoreHistoricalGossipFilters,
-		GossipUpdateThrottle:    !cfg.ProtocolOptions.NoGossipThrottle(),
+		PinnedSyncers:           cfg.Gossip.PinnedSyncers,
 	},
-		s.identityECDH.PubKey(),
+		nodeKeyECDH.PubKey(),
 	)
 
 	s.localChanMgr = &localchans.Manager{
@@ -1023,13 +1026,7 @@ func newServer(cfg *Config, listenAddrs []net.Addr,
 		CurrentNodeAnnouncement: func() (lnwire.NodeAnnouncement, error) {
 			return s.genNodeAnnouncement(true)
 		},
-		SendAnnouncement: func(msg lnwire.Message,
-			optionalFields ...discovery.OptionalMsgField) chan error {
-
-			return s.authGossiper.ProcessLocalAnnouncement(
-				msg, nodeKeyECDH.PubKey(), optionalFields...,
-			)
-		},
+		SendAnnouncement: s.authGossiper.ProcessLocalAnnouncement,
 		NotifyWhenOnline: s.NotifyWhenOnline,
 		TempChanIDSeed:   chanIDSeed,
 		FindChannel: func(chanID lnwire.ChannelID) (
@@ -1412,7 +1409,7 @@ func newServer(cfg *Config, listenAddrs []net.Addr,
 		RetryDuration:  time.Second * 5,
 		TargetOutbound: 100,
 		Dial: noiseDial(
-			s.identityECDH, s.cfg.net, s.cfg.ConnectionTimeout,
+			nodeKeyECDH, s.cfg.net, s.cfg.ConnectionTimeout,
 		),
 		OnConnection: s.OutboundPeerConnected,
 	})
@@ -3789,8 +3786,7 @@ func (s *server) fetchLastChanUpdate() func(lnwire.ShortChannelID) (
 // applyChannelUpdate applies the channel update to the different sub-systems of
 // the server.
 func (s *server) applyChannelUpdate(update *lnwire.ChannelUpdate) error {
-	pubKey := s.identityECDH.PubKey()
-	errChan := s.authGossiper.ProcessLocalAnnouncement(update, pubKey)
+	errChan := s.authGossiper.ProcessLocalAnnouncement(update)
 	select {
 	case err := <-errChan:
 		return err
