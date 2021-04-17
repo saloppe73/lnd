@@ -238,9 +238,6 @@ func NewMissionControl(db kvdb.Backend, self route.Vertex,
 func (m *MissionControl) init() error {
 	log.Debugf("Mission control state reconstruction started")
 
-	m.Lock()
-	defer m.Unlock()
-
 	start := time.Now()
 
 	results, err := m.store.fetchAll()
@@ -342,6 +339,27 @@ func (m *MissionControl) GetHistorySnapshot() *MissionControlSnapshot {
 	return m.state.getSnapshot()
 }
 
+// ImportHistory imports the set of mission control results provided to our
+// in-memory state. These results are not persisted, so will not survive
+// restarts.
+func (m *MissionControl) ImportHistory(history *MissionControlSnapshot) error {
+	if history == nil {
+		return errors.New("cannot import nil history")
+	}
+
+	m.Lock()
+	defer m.Unlock()
+
+	log.Infof("Importing history snapshot with %v pairs to mission control",
+		len(history.Pairs))
+
+	imported := m.state.importSnapshot(history)
+
+	log.Infof("Imported %v results to mission control", imported)
+
+	return nil
+}
+
 // GetPairHistorySnapshot returns the stored history for a given node pair.
 func (m *MissionControl) GetPairHistorySnapshot(
 	fromNode, toNode route.Vertex) TimedPairResult {
@@ -371,9 +389,6 @@ func (m *MissionControl) ReportPaymentFail(paymentID uint64, rt *route.Route,
 	failureSourceIdx *int, failure lnwire.FailureMessage) (
 	*channeldb.FailureReason, error) {
 
-	m.Lock()
-	defer m.Unlock()
-
 	timestamp := m.now()
 
 	result := &paymentResult{
@@ -393,9 +408,6 @@ func (m *MissionControl) ReportPaymentFail(paymentID uint64, rt *route.Route,
 // for future probability estimates.
 func (m *MissionControl) ReportPaymentSuccess(paymentID uint64,
 	rt *route.Route) error {
-
-	m.Lock()
-	defer m.Unlock()
 
 	timestamp := m.now()
 
@@ -420,6 +432,9 @@ func (m *MissionControl) processPaymentResult(result *paymentResult) (
 	if err := m.store.AddResult(result); err != nil {
 		return nil, err
 	}
+
+	m.Lock()
+	defer m.Unlock()
 
 	// Apply result to update mission control state.
 	reason := m.applyPaymentResult(result)

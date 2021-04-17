@@ -100,19 +100,21 @@ func makeTestDB() (*channeldb.DB, func(), error) {
 type mockGraphSource struct {
 	bestHeight uint32
 
-	mu      sync.Mutex
-	nodes   []channeldb.LightningNode
-	infos   map[uint64]channeldb.ChannelEdgeInfo
-	edges   map[uint64][]channeldb.ChannelEdgePolicy
-	zombies map[uint64][][33]byte
+	mu            sync.Mutex
+	nodes         []channeldb.LightningNode
+	infos         map[uint64]channeldb.ChannelEdgeInfo
+	edges         map[uint64][]channeldb.ChannelEdgePolicy
+	zombies       map[uint64][][33]byte
+	chansToReject map[uint64]struct{}
 }
 
 func newMockRouter(height uint32) *mockGraphSource {
 	return &mockGraphSource{
-		bestHeight: height,
-		infos:      make(map[uint64]channeldb.ChannelEdgeInfo),
-		edges:      make(map[uint64][]channeldb.ChannelEdgePolicy),
-		zombies:    make(map[uint64][][33]byte),
+		bestHeight:    height,
+		infos:         make(map[uint64]channeldb.ChannelEdgeInfo),
+		edges:         make(map[uint64][]channeldb.ChannelEdgePolicy),
+		zombies:       make(map[uint64][][33]byte),
+		chansToReject: make(map[uint64]struct{}),
 	}
 }
 
@@ -138,8 +140,19 @@ func (r *mockGraphSource) AddEdge(info *channeldb.ChannelEdgeInfo,
 		return errors.New("info already exist")
 	}
 
+	if _, ok := r.chansToReject[info.ChannelID]; ok {
+		return errors.New("validation failed")
+	}
+
 	r.infos[info.ChannelID] = *info
 	return nil
+}
+
+func (r *mockGraphSource) queueValidationFail(chanID uint64) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	r.chansToReject[chanID] = struct{}{}
 }
 
 func (r *mockGraphSource) UpdateEdge(edge *channeldb.ChannelEdgePolicy,
@@ -897,9 +910,8 @@ func TestProcessAnnouncement(t *testing.T) {
 	}
 }
 
-// TestPrematureAnnouncement checks that premature announcements are
-// not propagated to the router subsystem until block with according
-// block height received.
+// TestPrematureAnnouncement checks that premature announcements are not
+// propagated to the router subsystem.
 func TestPrematureAnnouncement(t *testing.T) {
 	t.Parallel()
 
@@ -920,8 +932,8 @@ func TestPrematureAnnouncement(t *testing.T) {
 
 	// Pretending that we receive the valid channel announcement from
 	// remote side, but block height of this announcement is greater than
-	// highest know to us, for that reason it should be added to the
-	// repeat/premature batch.
+	// highest know to us, for that reason it should be ignored and not
+	// added to the router.
 	ca, err := createRemoteChannelAnnouncement(1)
 	if err != nil {
 		t.Fatalf("can't create channel announcement: %v", err)
@@ -929,30 +941,12 @@ func TestPrematureAnnouncement(t *testing.T) {
 
 	select {
 	case <-ctx.gossiper.ProcessRemoteAnnouncement(ca, nodePeer):
-		t.Fatal("announcement was proceeded")
-	case <-time.After(100 * time.Millisecond):
+	case <-time.After(time.Second):
+		t.Fatal("announcement was not processed")
 	}
 
 	if len(ctx.router.infos) != 0 {
 		t.Fatal("edge was added to router")
-	}
-
-	// Pretending that we receive the valid channel update announcement from
-	// remote side, but block height of this announcement is greater than
-	// highest known to us, so it should be rejected.
-	ua, err := createUpdateAnnouncement(1, 0, remoteKeyPriv1, timestamp)
-	if err != nil {
-		t.Fatalf("can't create update announcement: %v", err)
-	}
-
-	select {
-	case <-ctx.gossiper.ProcessRemoteAnnouncement(ua, nodePeer):
-		t.Fatal("announcement was proceeded")
-	case <-time.After(100 * time.Millisecond):
-	}
-
-	if len(ctx.router.edges) != 0 {
-		t.Fatal("edge update was added to router")
 	}
 }
 
@@ -4194,5 +4188,58 @@ func TestIgnoreOwnAnnouncement(t *testing.T) {
 	}
 	if err == nil || !strings.Contains(err.Error(), "ignoring") {
 		t.Fatalf("expected gossiper to ignore announcement, got: %v", err)
+	}
+}
+
+// TestRejectCacheChannelAnn checks that if we reject a channel announcement,
+// then if we attempt to validate it again, we'll reject it with the proper
+// error.
+func TestRejectCacheChannelAnn(t *testing.T) {
+	t.Parallel()
+
+	ctx, cleanup, err := createTestCtx(proofMatureDelta)
+	if err != nil {
+		t.Fatalf("can't create context: %v", err)
+	}
+	defer cleanup()
+
+	// First, we create a channel announcement to send over to our test
+	// peer.
+	batch, err := createRemoteAnnouncements(0)
+	if err != nil {
+		t.Fatalf("can't generate announcements: %v", err)
+	}
+
+	remoteKey, err := btcec.ParsePubKey(batch.nodeAnn2.NodeID[:], btcec.S256())
+	if err != nil {
+		t.Fatalf("unable to parse pubkey: %v", err)
+	}
+	remotePeer := &mockPeer{remoteKey, nil, nil}
+
+	// Before sending over the announcement, we'll modify it such that we
+	// know it will always fail.
+	chanID := batch.chanAnn.ShortChannelID.ToUint64()
+	ctx.router.queueValidationFail(chanID)
+
+	// If we process the batch the first time we should get an error.
+	select {
+	case err = <-ctx.gossiper.ProcessRemoteAnnouncement(
+		batch.chanAnn, remotePeer,
+	):
+		require.NotNil(t, err)
+	case <-time.After(2 * time.Second):
+		t.Fatal("did not process remote announcement")
+	}
+
+	// If we process it a *second* time, then we should get an error saying
+	// we rejected it already.
+	select {
+	case err = <-ctx.gossiper.ProcessRemoteAnnouncement(
+		batch.chanAnn, remotePeer,
+	):
+		errStr := err.Error()
+		require.Contains(t, errStr, "recently rejected")
+	case <-time.After(2 * time.Second):
+		t.Fatal("did not process remote announcement")
 	}
 }

@@ -769,20 +769,21 @@ func newServer(cfg *Config, listenAddrs []net.Addr,
 	s.controlTower = routing.NewControlTower(paymentControl)
 
 	s.chanRouter, err = routing.New(routing.Config{
-		Graph:              chanGraph,
-		Chain:              cc.ChainIO,
-		ChainView:          cc.ChainView,
-		Payer:              s.htlcSwitch,
-		Control:            s.controlTower,
-		MissionControl:     s.missionControl,
-		SessionSource:      paymentSessionSource,
-		ChannelPruneExpiry: routing.DefaultChannelPruneExpiry,
-		GraphPruneInterval: time.Duration(time.Hour),
-		QueryBandwidth:     queryBandwidth,
-		AssumeChannelValid: cfg.Routing.AssumeChannelValid,
-		NextPaymentID:      sequencer.NextID,
-		PathFindingConfig:  pathFindingConfig,
-		Clock:              clock.NewDefaultClock(),
+		Graph:               chanGraph,
+		Chain:               cc.ChainIO,
+		ChainView:           cc.ChainView,
+		Payer:               s.htlcSwitch,
+		Control:             s.controlTower,
+		MissionControl:      s.missionControl,
+		SessionSource:       paymentSessionSource,
+		ChannelPruneExpiry:  routing.DefaultChannelPruneExpiry,
+		GraphPruneInterval:  time.Hour,
+		FirstTimePruneDelay: routing.DefaultFirstTimePruneDelay,
+		QueryBandwidth:      queryBandwidth,
+		AssumeChannelValid:  cfg.Routing.AssumeChannelValid,
+		NextPaymentID:       sequencer.NextID,
+		PathFindingConfig:   pathFindingConfig,
+		Clock:               clock.NewDefaultClock(),
 	})
 	if err != nil {
 		return nil, fmt.Errorf("can't create router: %v", err)
@@ -823,6 +824,8 @@ func newServer(cfg *Config, listenAddrs []net.Addr,
 		SubBatchDelay:           time.Second * 5,
 		IgnoreHistoricalFilters: cfg.IgnoreHistoricalGossipFilters,
 		PinnedSyncers:           cfg.Gossip.PinnedSyncers,
+		MaxChannelUpdateBurst:   cfg.Gossip.MaxChannelUpdateBurst,
+		ChannelUpdateInterval:   cfg.Gossip.ChannelUpdateInterval,
 	},
 		nodeKeyECDH.PubKey(),
 	)
@@ -965,7 +968,9 @@ func newServer(cfg *Config, listenAddrs []net.Addr,
 				return ErrServerShuttingDown
 			}
 		},
-		DisableChannel:                s.chanStatusMgr.RequestDisable,
+		DisableChannel: func(chanPoint wire.OutPoint) error {
+			return s.chanStatusMgr.RequestDisable(chanPoint, false)
+		},
 		Sweeper:                       s.sweeper,
 		Registry:                      s.invoices,
 		NotifyClosedChannel:           s.channelNotifier.NotifyClosedChannelEvent,
@@ -1241,12 +1246,12 @@ func newServer(cfg *Config, listenAddrs []net.Addr,
 		policy := wtpolicy.DefaultPolicy()
 
 		if cfg.WtClient.SweepFeeRate != 0 {
-			// We expose the sweep fee rate in sat/byte, but the
+			// We expose the sweep fee rate in sat/vbyte, but the
 			// tower protocol operations on sat/kw.
-			sweepRateSatPerByte := chainfee.SatPerKVByte(
+			sweepRateSatPerVByte := chainfee.SatPerKVByte(
 				1000 * cfg.WtClient.SweepFeeRate,
 			)
-			policy.SweepFeeRate = sweepRateSatPerByte.FeePerKWeight()
+			policy.SweepFeeRate = sweepRateSatPerVByte.FeePerKWeight()
 		}
 
 		if err := policy.Validate(); err != nil {
@@ -3129,9 +3134,12 @@ func (s *server) peerConnected(conn net.Conn, connReq *connmgr.ConnReq,
 		UnsafeReplay:            s.cfg.UnsafeReplay,
 		MaxOutgoingCltvExpiry:   s.cfg.MaxOutgoingCltvExpiry,
 		MaxChannelFeeAllocation: s.cfg.MaxChannelFeeAllocation,
+		CoopCloseTargetConfs:    s.cfg.CoopCloseTargetConfs,
 		MaxAnchorsCommitFeeRate: chainfee.SatPerKVByte(
 			s.cfg.MaxCommitFeeRateAnchors * 1000).FeePerKWeight(),
-		Quit: s.quit,
+		ChannelCommitInterval:  s.cfg.ChannelCommitInterval,
+		ChannelCommitBatchSize: s.cfg.ChannelCommitBatchSize,
+		Quit:                   s.quit,
 	}
 
 	copy(pCfg.PubKeyBytes[:], peerAddr.IdentityKey.SerializeCompressed())
@@ -3803,7 +3811,9 @@ func newSweepPkScriptGen(
 	wallet lnwallet.WalletController) func() ([]byte, error) {
 
 	return func() ([]byte, error) {
-		sweepAddr, err := wallet.NewAddress(lnwallet.WitnessPubKey, false)
+		sweepAddr, err := wallet.NewAddress(
+			lnwallet.WitnessPubKey, false, lnwallet.DefaultAccountName,
+		)
 		if err != nil {
 			return nil, err
 		}

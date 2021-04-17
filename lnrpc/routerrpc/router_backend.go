@@ -9,8 +9,8 @@ import (
 	"time"
 
 	"github.com/btcsuite/btcd/btcec"
-
 	"github.com/btcsuite/btcd/chaincfg"
+	"github.com/btcsuite/btcd/wire"
 	"github.com/btcsuite/btcutil"
 	"github.com/lightningnetwork/lnd/channeldb"
 	"github.com/lightningnetwork/lnd/htlcswitch"
@@ -83,6 +83,16 @@ type RouterBackend struct {
 	// InterceptableForwarder exposes the ability to intercept forward events
 	// by letting the router register a ForwardInterceptor.
 	InterceptableForwarder htlcswitch.InterceptableHtlcForwarder
+
+	// SetChannelEnabled exposes the ability to manually enable a channel.
+	SetChannelEnabled func(wire.OutPoint) error
+
+	// SetChannelDisabled exposes the ability to manually disable a channel
+	SetChannelDisabled func(wire.OutPoint) error
+
+	// SetChannelAuto exposes the ability to restore automatic channel state
+	// management after manually setting channel status.
+	SetChannelAuto func(wire.OutPoint) error
 }
 
 // MissionControl defines the mission control dependencies of routerrpc.
@@ -99,6 +109,11 @@ type MissionControl interface {
 	// GetHistorySnapshot takes a snapshot from the current mission control
 	// state and actual probability estimates.
 	GetHistorySnapshot() *routing.MissionControlSnapshot
+
+	// ImportHistory imports the mission control snapshot to our internal
+	// state. This import will only be applied in-memory, and will not be
+	// persisted across restarts.
+	ImportHistory(*routing.MissionControlSnapshot) error
 
 	// GetPairHistorySnapshot returns the stored history for a given node
 	// pair.
@@ -440,6 +455,11 @@ func UnmarshallHopWithPubkey(rpcHop *lnrpc.Hop, pubkey route.Vertex) (*route.Hop
 		return nil, err
 	}
 
+	amp, err := UnmarshalAMP(rpcHop.AmpRecord)
+	if err != nil {
+		return nil, err
+	}
+
 	return &route.Hop{
 		OutgoingTimeLock: rpcHop.Expiry,
 		AmtToForward:     lnwire.MilliSatoshi(rpcHop.AmtToForwardMsat),
@@ -448,6 +468,7 @@ func UnmarshallHopWithPubkey(rpcHop *lnrpc.Hop, pubkey route.Vertex) (*route.Hop
 		CustomRecords:    customRecords,
 		LegacyPayload:    !rpcHop.TlvPayload,
 		MPP:              mpp,
+		AMP:              amp,
 	}, nil
 }
 
@@ -880,6 +901,32 @@ func UnmarshalMPP(reqMPP *lnrpc.MPPRecord) (*record.MPP, error) {
 	return record.NewMPP(total, addr), nil
 }
 
+func UnmarshalAMP(reqAMP *lnrpc.AMPRecord) (*record.AMP, error) {
+	if reqAMP == nil {
+		return nil, nil
+	}
+
+	reqRootShare := reqAMP.RootShare
+	reqSetID := reqAMP.SetId
+
+	switch {
+	case len(reqRootShare) != 32:
+		return nil, errors.New("AMP root_share must be 32 bytes")
+
+	case len(reqSetID) != 32:
+		return nil, errors.New("AMP set_id must be 32 bytes")
+	}
+
+	var (
+		rootShare [32]byte
+		setID     [32]byte
+	)
+	copy(rootShare[:], reqRootShare)
+	copy(setID[:], reqSetID)
+
+	return record.NewAMP(rootShare, setID, reqAMP.ChildIndex), nil
+}
+
 // MarshalHTLCAttempt constructs an RPC HTLCAttempt from the db representation.
 func (r *RouterBackend) MarshalHTLCAttempt(
 	htlc channeldb.HTLCAttempt) (*lnrpc.HTLCAttempt, error) {
@@ -1097,6 +1144,9 @@ func marshallWireError(msg lnwire.FailureMessage,
 
 	case *lnwire.FailMPPTimeout:
 		response.Code = lnrpc.Failure_MPP_TIMEOUT
+
+	case *lnwire.InvalidOnionPayload:
+		response.Code = lnrpc.Failure_INVALID_ONION_PAYLOAD
 
 	case nil:
 		response.Code = lnrpc.Failure_UNKNOWN_FAILURE
